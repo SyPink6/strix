@@ -10,7 +10,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from agents import RunConfig
 from agents.sandbox import SandboxRunConfig
@@ -28,6 +28,11 @@ from strix.config.models import (
     uses_chat_completions_tool_schema,
 )
 from strix.config.settings import DEFAULT_MAX_TURNS
+from strix.core.adaptive_scheduler import (
+    DEFAULT_PER_AGENT_SHARE,
+    AdaptiveScheduler,
+    set_global_adaptive_scheduler,
+)
 from strix.core.agents import AgentCoordinator, BudgetPolicy
 from strix.core.execution import (
     respawn_subagents,
@@ -209,6 +214,8 @@ async def run_strix_scan(
     max_turns: int = DEFAULT_MAX_TURNS,
     max_budget_usd: float | None = None,
     budget_policy: BudgetPolicy = "stop",
+    scheduler_mode: Literal["off", "shadow", "enforce"] = "off",
+    per_agent_share: float = DEFAULT_PER_AGENT_SHARE,
     model: str | None = None,
     cleanup_on_exit: bool = True,
     event_sink: StreamEventSink | None = None,
@@ -235,6 +242,11 @@ async def run_strix_scan(
     agent before its next LLM call until the caller resumes the scan through
     ``coordinator.resume_budget()`` (optionally with a higher limit) or cancels
     it. ``coordinator.pause_budget()`` parks a running scan the same way.
+    ``scheduler_mode`` enables the adaptive scheduler (default ``"off"``):
+    ``"shadow"`` logs spawn-admission and per-agent share decisions to the
+    run's ``decisions.jsonl`` without acting, ``"enforce"`` also denies
+    matching spawns; ``per_agent_share`` sets the per-agent cost ceiling it
+    enforces as a fraction of ``max_budget_usd``.
     ``mcp_connection_requests`` supplies the run's MCP connections from any
     source: when given, the engine connects those requests; when ``None`` (the
     command-line default) it reads ``~/.strix/mcp-servers.json`` itself. Either
@@ -256,6 +268,22 @@ async def run_strix_scan(
     state_dir.mkdir(parents=True, exist_ok=True)
     teardown_logging = setup_scan_logging(run_dir)
     set_scan_id(scan_id)
+
+    # Adaptive scheduler (off by default): spawn admission, per-agent cost
+    # share, JSONL decision log. Rebuilt per scan so a fresh run never
+    # inherits the previous scan's warned-agent set; "off" also clears any
+    # scheduler a prior scan in this process left behind.
+    scheduler = (
+        AdaptiveScheduler(
+            mode=scheduler_mode,
+            max_budget_usd=max_budget_usd,
+            per_agent_share=per_agent_share,
+            decision_log=run_dir / "decisions.jsonl",
+        )
+        if scheduler_mode != "off"
+        else None
+    )
+    set_global_adaptive_scheduler(scheduler)
 
     agents_path = state_dir / "agents.json"
     agents_db = state_dir / "agents.db"

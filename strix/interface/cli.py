@@ -14,6 +14,7 @@ from rich.text import Text
 
 from strix.config import load_settings
 from strix.config.settings import DEFAULT_MAX_TURNS
+from strix.core.adaptive_scheduler import DEFAULT_PER_AGENT_SHARE
 from strix.core.runner import run_strix_scan
 from strix.report.state import ReportState, set_global_report_state
 from strix.runtime import session_manager
@@ -225,6 +226,8 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
                     interactive=bool(getattr(args, "interactive", False)),
                     max_budget_usd=getattr(args, "max_budget_usd", None),
                     max_turns=getattr(args, "max_turns", DEFAULT_MAX_TURNS),
+                    scheduler_mode=getattr(args, "scheduler", "off"),
+                    per_agent_share=getattr(args, "per_agent_share", DEFAULT_PER_AGENT_SHARE),
                     status_sink=_note_startup_phase,
                 )
             finally:

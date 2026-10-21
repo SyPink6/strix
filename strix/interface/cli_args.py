@@ -9,6 +9,7 @@ from pathlib import Path
 
 from strix.config import apply_config_override
 from strix.config.settings import DEFAULT_MAX_TURNS
+from strix.core.adaptive_scheduler import DEFAULT_PER_AGENT_SHARE
 from strix.core.paths import RUNS_DIR_NAME, run_dir_for, runtime_state_dir
 from strix.interface.scan_setup import attach_workspace_mount, build_targets_info
 from strix.interface.update_check import self_update
@@ -54,6 +55,16 @@ def _positive_int(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be an integer greater than 0")
     return parsed
+
+
+def _share_fraction(value: str) -> float:
+    try:
+        share = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid float value: {value!r}") from exc
+    if not 0 < share <= 1:
+        raise argparse.ArgumentTypeError("must be a fraction in (0, 1]")
+    return share
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -283,6 +294,33 @@ Strix Cloud:
         help=(
             "Maximum LLM cost in USD (> 0). The scan stops cleanly when this limit is reached. "
             "Graduated wrap-up warnings are sent to all agents as it is approached."
+        ),
+    )
+
+    parser.add_argument(
+        "--scheduler",
+        dest="scheduler",
+        choices=("off", "shadow", "enforce"),
+        default="off",
+        help=(
+            "Adaptive agent scheduler (default 'off' keeps vanilla behavior). "
+            "'shadow' logs spawn-admission and per-agent budget-share decisions "
+            "to decisions.jsonl without enforcing them; 'enforce' also denies "
+            "spawns that only file reports, duplicate a running agent, or cross "
+            "the budget floor or concurrency cap."
+        ),
+    )
+
+    parser.add_argument(
+        "--per-agent-share",
+        dest="per_agent_share",
+        metavar="SHARE",
+        type=_share_fraction,
+        default=DEFAULT_PER_AGENT_SHARE,
+        help=(
+            "Per-agent cost ceiling as a fraction of --max-budget (0 < SHARE <= 1, "
+            "default %(default)s). An agent crossing its ceiling gets a one-time "
+            "wrap-up directive. Only effective with --scheduler."
         ),
     )
 
