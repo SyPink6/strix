@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from agents.lifecycle import RunHooks
 
+from strix.core.adaptive_scheduler import get_global_adaptive_scheduler
 from strix.core.agents import BudgetPolicy, coordinator_from_context
 from strix.report.state import get_global_report_state
 
@@ -197,7 +198,7 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
     async def on_llm_start(
         self,
         context: RunContextWrapper[dict[str, Any]],
-        agent: Agent[dict[str, Any]],  # noqa: ARG002
+        agent: Agent[dict[str, Any]],
         system_prompt: str | None,  # noqa: ARG002
         input_items: list[TResponseInputItem],
     ) -> None:
@@ -208,6 +209,7 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         try:
             self._maybe_warn_turns(context, input_items)
             self._maybe_warn_budget(context, input_items)
+            self._maybe_warn_agent_share(context, agent, input_items)
         except Exception:
             logger.exception("budget/turn warning injection failed")
 
@@ -314,6 +316,32 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
                 f"agent's final report. {_wrapup_directive(context, stage)}"
             )
         input_items.append({"role": "user", "content": content})
+
+    def _maybe_warn_agent_share(
+        self,
+        context: RunContextWrapper[dict[str, Any]],
+        agent: Agent[dict[str, Any]],
+        input_items: list[TResponseInputItem],
+    ) -> None:
+        """Per-agent cost-share ceiling (adaptive scheduler; inert unless configured)."""
+        scheduler = get_global_adaptive_scheduler()
+        if scheduler is None:
+            return
+        agent_id = context.context.get("agent_id")
+        if not isinstance(agent_id, str) or not agent_id:
+            return
+        if context.context.get("parent_id") is None:
+            return  # the root agent answers to the scan-level warning bands
+        report_state = get_global_report_state()
+        if report_state is None:
+            return
+        decision = scheduler.check_agent_share(
+            agent_id=agent_id,
+            agent_name=agent.name,
+            spend=report_state.get_agent_llm_cost(agent_id),
+        )
+        if decision.should_warn and decision.message:
+            input_items.append({"role": "user", "content": decision.message})
 
     async def on_llm_end(
         self,

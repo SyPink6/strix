@@ -23,6 +23,7 @@ from openai import (
 )
 
 from strix.config import codex
+from strix.core.adaptive_scheduler import get_global_adaptive_scheduler, running_children
 from strix.core.hooks import (
     BudgetExceededError,
     BudgetPausedError,
@@ -39,6 +40,7 @@ from strix.core.sessions import (
 )
 from strix.llm import request_log
 from strix.llm.compaction import is_context_overflow, maybe_compact
+from strix.report.state import get_global_report_state
 
 
 if TYPE_CHECKING:
@@ -403,6 +405,33 @@ async def spawn_child_agent(
     parent_id = parent_ctx.get("agent_id")
     if not isinstance(parent_id, str):
         raise TypeError("Parent agent_id missing from context")
+
+    # Adaptive-scheduler admission (inert unless a scheduler is configured).
+    # A denial is a structured result, not an error: the parent agent reads
+    # the reason and suggestion and decides how to proceed.
+    scheduler = get_global_adaptive_scheduler()
+    if scheduler is not None:
+        report_state = get_global_report_state()
+        decision = scheduler.decide_spawn(
+            name=name,
+            task=task,
+            active_children=running_children(coordinator),
+            task_cost=report_state.get_total_llm_cost() if report_state is not None else 0.0,
+        )
+        if not decision.allowed:
+            logger.info(
+                "adaptive scheduler denied spawn %r (%s): %s",
+                name,
+                decision.rule,
+                decision.reason,
+            )
+            return {
+                "success": False,
+                "name": name,
+                "parent_id": parent_id,
+                "reason": decision.reason,
+                "suggestion": decision.suggestion,
+            }
 
     child_id = uuid.uuid4().hex[:8]
     child_agent = factory(name=name, skills=skills)

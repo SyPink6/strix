@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from strix.core.adaptive_scheduler import AdaptiveScheduler
 from strix.core.agents import AgentCoordinator
 from strix.core.hooks import (
     BudgetExceededError,
@@ -507,3 +508,72 @@ def test_recomputed_budget_flags(
     expected: tuple[bool, bool],
 ) -> None:
     assert recomputed_budget_flags(cost, max_budget, interactive=interactive) == expected
+
+
+# ---------------------------------------------------------------------------
+# Adaptive-scheduler per-agent share ceiling (M1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_share_warning_injected_once_per_agent() -> None:
+    hooks = ReportUsageHooks(model="test-model")
+    scheduler = AdaptiveScheduler(mode="enforce", max_budget_usd=1.0, per_agent_share=0.30)
+    state = _make_report_state(0.40)
+    state.get_agent_llm_cost.return_value = 0.40
+    agent = MagicMock()
+    agent.name = "Validator"
+    items: list[Any] = []
+    with (
+        patch("strix.core.hooks.get_global_report_state", return_value=state),
+        patch("strix.core.hooks.get_global_adaptive_scheduler", return_value=scheduler),
+    ):
+        await hooks.on_llm_start(
+            _make_warn_context(requests=0, parent_id="root-1", agent_id="child-1"),
+            agent,
+            None,
+            items,
+        )
+        await hooks.on_llm_start(
+            _make_warn_context(requests=1, parent_id="root-1", agent_id="child-1"),
+            agent,
+            None,
+            items,
+        )
+    assert len(items) == 1
+    content = items[0]["content"]
+    assert "[NOTICE]" in content
+    assert "budget share" in content
+    state.get_agent_llm_cost.assert_called_with("child-1")
+
+
+@pytest.mark.asyncio
+async def test_agent_share_warning_skipped_for_root_agent() -> None:
+    hooks = ReportUsageHooks(model="test-model")
+    scheduler = AdaptiveScheduler(mode="enforce", max_budget_usd=1.0, per_agent_share=0.30)
+    state = _make_report_state(0.90)
+    items: list[Any] = []
+    with (
+        patch("strix.core.hooks.get_global_report_state", return_value=state),
+        patch("strix.core.hooks.get_global_adaptive_scheduler", return_value=scheduler),
+    ):
+        await hooks.on_llm_start(
+            _make_warn_context(requests=0, parent_id=None), MagicMock(), None, items
+        )
+    assert items == []  # the root answers to the scan-level bands, not the per-agent ceiling
+    state.get_agent_llm_cost.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_share_warning_inert_without_scheduler() -> None:
+    hooks = ReportUsageHooks(model="test-model")
+    state = _make_report_state(0.90)
+    items: list[Any] = []
+    with (
+        patch("strix.core.hooks.get_global_report_state", return_value=state),
+        patch("strix.core.hooks.get_global_adaptive_scheduler", return_value=None),
+    ):
+        await hooks.on_llm_start(
+            _make_warn_context(requests=0, parent_id="root-1"), MagicMock(), None, items
+        )
+    assert items == []

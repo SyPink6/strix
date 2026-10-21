@@ -716,6 +716,10 @@ class ReportState:
         """Live accumulated LLM cost, independent of the persisted run-record snapshot."""
         return self._llm_usage.total_cost
 
+    def get_agent_llm_cost(self, agent_id: str) -> float:
+        """Live estimated cost attributable to one agent so far (best-effort)."""
+        return self._llm_usage.agent_cost(agent_id)
+
     def update_scan_final_fields(
         self,
         executive_summary: str,

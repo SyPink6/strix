@@ -87,6 +87,23 @@ class LLMUsageLedger:
             self._observed_cost += float(cost)
             self._has_observed_cost = True
 
+    def agent_cost(self, agent_id: str) -> float:
+        """Best-effort cost attributable to one agent's accumulated usage.
+
+        Token totals are exact per agent, but the price is re-estimated from
+        the agent's model: observed relay costs cannot be split per agent, so
+        the sum over agents approximates ``total_cost`` rather than matching
+        it. Used by the adaptive scheduler's per-agent share ceiling.
+        """
+        if self.zero_cost:
+            return 0.0
+        key = str(agent_id or "unknown")
+        usage = self._agent_usage.get(key)
+        if usage is None or not _usage_has_activity(usage):
+            return 0.0
+        model = self._agent_metadata.get(key, {}).get("model")
+        return _round_cost(_estimate_litellm_cost(usage, model) or 0.0)
+
     def record_provider(
         self,
         provider: str,
