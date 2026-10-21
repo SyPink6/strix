@@ -127,6 +127,17 @@ class DedupeSettings(BaseSettings):
         return _lowercase(value)
 
 
+class PricingSettings(BaseSettings):
+    model_config = _BASE_CONFIG
+
+    # Per-token USD price overrides for models LiteLLM cannot price
+    # unambiguously: "model=input,output[,cached]" entries, ';'-separated.
+    # 'cached' prices cached-input reads (default 0 = free), so a two-value
+    # entry matches uncached-token accounting. Overrides outrank the catalog;
+    # see strix.report.pricing for the accepted format.
+    price_overrides: str | None = Field(default=None, alias="STRIX_PRICE_OVERRIDES")
+
+
 class ContextSettings(BaseSettings):
     """Context-window management: per-tool-output caps and history compaction."""
 
@@ -217,6 +228,7 @@ class Settings(BaseSettings):
 
     llm: LlmSettings = Field(default_factory=LlmSettings)
     dedupe: DedupeSettings = Field(default_factory=DedupeSettings)
+    pricing: PricingSettings = Field(default_factory=PricingSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     context: ContextSettings = Field(default_factory=ContextSettings)
     telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)

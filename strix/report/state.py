@@ -14,7 +14,11 @@ from strix.config import codex
 from strix.config.loader import load_settings
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.report.coverage import write_coverage
-from strix.report.pricing import resolve_litellm_model
+from strix.report.pricing import (
+    estimate_cost_with_override,
+    price_override_for,
+    resolve_litellm_model,
+)
 from strix.report.sarif import write_sarif
 from strix.report.writer import (
     read_run_record,
@@ -1161,6 +1165,12 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
     candidates.append(model)
     if "/" in model:
         candidates.append(model.rsplit("/", 1)[-1])
+
+    # A configured price override outranks the catalog (see usage.py).
+    for candidate in candidates:
+        override = price_override_for(candidate)
+        if override is not None:
+            return estimate_cost_with_override(usage_payload, override)
 
     for candidate in candidates:
         resolved = resolve_litellm_model(candidate)

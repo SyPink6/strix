@@ -18,6 +18,7 @@ from strix.config.models import (
     _configure_litellm_compatibility,
     _install_openrouter_stream_cost_capture,
 )
+from strix.config.settings import PricingSettings, Settings
 from strix.llm import request_log
 from strix.report.state import (
     ReportState,
@@ -165,6 +166,29 @@ def test_cost_callback_estimates_cost_with_bare_model_fallback() -> None:
         litellm_cost_callback(kwargs, response)
 
     report_state.record_observed_llm_cost.assert_called_once_with(0.025)
+
+
+def test_cost_callback_uses_price_override_when_catalog_cannot_price() -> None:
+    report_state = MagicMock()
+    response = {"usage": {"prompt_tokens": 1000, "completion_tokens": 200, "total_tokens": 1200}}
+    kwargs = {"response_cost": None, "model": "openai/alibaba/glm-5.2"}
+
+    with (
+        patch("strix.report.state.get_global_report_state", return_value=report_state),
+        patch("litellm.completion_cost", side_effect=ValueError("unknown model")) as catalog,
+        patch(
+            "strix.config.loader.load_settings",
+            return_value=Settings(
+                pricing=PricingSettings(price_overrides="alibaba/glm-5.2=1.4e-6,4.4e-6")
+            ),
+        ),
+    ):
+        litellm_cost_callback(kwargs, response)
+
+    catalog.assert_not_called()
+    report_state.record_observed_llm_cost.assert_called_once_with(
+        pytest.approx(1000 * 1.4e-6 + 200 * 4.4e-6)
+    )
 
 
 def test_cost_callback_records_nothing_when_no_cost_available() -> None:

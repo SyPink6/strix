@@ -8,7 +8,11 @@ from typing import Any
 from agents.usage import Usage, deserialize_usage, serialize_usage
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from strix.report.pricing import resolve_litellm_model
+from strix.report.pricing import (
+    estimate_cost_with_override,
+    price_override_for,
+    resolve_litellm_model,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -259,6 +263,15 @@ def _estimate_litellm_entry_cost(entry: Any, model: str) -> float | None:
     candidates = [model]
     if "/" in model:
         candidates.append(model.rsplit("/", 1)[-1])
+
+    # A configured price override outranks the catalog: catalog entries that
+    # are ambiguous (one bare name, several differently-priced providers)
+    # resolve to None and silently zero out cost accounting — along with
+    # every budget limit built on it.
+    for candidate in candidates:
+        override = price_override_for(candidate)
+        if override is not None:
+            return estimate_cost_with_override(usage_payload, override)
 
     for candidate in candidates:
         resolved = resolve_litellm_model(candidate)
