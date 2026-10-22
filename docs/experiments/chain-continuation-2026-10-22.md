@@ -108,6 +108,6 @@ root 自身成本 $0.649（32%）也值得注意：62 请求中 think 65 次（�
 
 ## 后续
 
-- v2 触发源扩展：coverage `needs_follow_up`（能力型 surface）作为次级触发；报告层验证拒绝率排查（vanilla 缺口，独立于本项目三机制）。
+- ~~v2 触发源扩展：coverage `needs_follow_up`（能力型 surface）作为次级触发；报告层验证拒绝率排查（vanilla 缺口，独立于本项目三机制）~~ → **已于同日实现**（含续攻窗口，共三项修正），见设计文档 §9；复跑实验待放行。
 - 规则 v2 其余项（reporting_spawn 收窄、per-task 动态预算）不变。
 - 多 seed 复跑时优先复测 run 3 配置（$1.10/75 + chain）——它是唯一同时拿到 4 findings 与两次 chain 事件全通的配置。

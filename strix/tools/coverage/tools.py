@@ -27,6 +27,8 @@ from typing import Any
 
 from agents import RunContextWrapper, function_tool
 
+from strix.core.attack_chain import get_global_attack_chain
+
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +190,22 @@ def _duplicate_of_locked(surface: str, risk_area: str) -> tuple[str, dict[str, A
     return None
 
 
+def _notify_chain(entry: dict[str, Any]) -> None:
+    """Hand a coverage event to the attack-chain tracker; never block the tool.
+
+    The tracker filters for open ``needs_follow_up`` threads on
+    capability-relevant surfaces, so callers pass every record and update and
+    let it decide. A tracker failure must never cost an agent its coverage
+    bookkeeping, so everything it can raise is absorbed here.
+    """
+    try:
+        chain = get_global_attack_chain()
+        if chain is not None:
+            chain.on_coverage(entry)
+    except Exception:
+        logger.exception("attack-chain coverage notification failed")
+
+
 def _record_impl(
     *,
     surface: str,
@@ -247,6 +265,14 @@ def _record_impl(
         entry_id,
         normalized,
         entry["surface"],
+    )
+    _notify_chain(
+        {
+            "entry_id": entry_id,
+            "surface": entry["surface"],
+            "risk_area": entry["risk_area"],
+            "outcome": normalized,
+        }
     )
     return {
         "success": True,
@@ -310,6 +336,14 @@ def _update_impl(
         previous_outcome,
         normalized,
         surface,
+    )
+    _notify_chain(
+        {
+            "entry_id": key,
+            "surface": surface,
+            "risk_area": risk_area,
+            "outcome": normalized,
+        }
     )
     return {
         "success": True,

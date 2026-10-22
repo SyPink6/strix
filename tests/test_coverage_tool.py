@@ -6,6 +6,7 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -282,3 +283,67 @@ def test_concurrent_records_all_survive_persistence(coverage_store: Path) -> Non
     assert len(persisted) == 8
     hydrate_coverage_from_disk(coverage_store)
     assert len(get_coverage_entries()) == 8
+
+
+# ---------------------------------------------------------------------------
+# Attack-chain notification: the tracker sees every coverage event
+# ---------------------------------------------------------------------------
+
+
+def test_open_thread_notifies_chain() -> None:
+    tracker = MagicMock()
+    with patch("strix.tools.coverage.tools.get_global_attack_chain", return_value=tracker):
+        result = _record(
+            surface="POST /edit_profile/{company_id}",
+            risk_area="mass assignment of is_admin",
+            outcome="needs_follow_up",
+            evidence="is_admin accepted on a non-admin token; not yet chained further.",
+        )
+    assert result["success"] is True
+    tracker.on_coverage.assert_called_once()
+    entry = tracker.on_coverage.call_args.args[0]
+    assert entry["outcome"] == "needs_follow_up"
+    assert entry["surface"] == "POST /edit_profile/{company_id}"
+    assert entry["entry_id"] == result["entry_id"]  # the tracker's dedupe key
+    tracker.on_finding.assert_not_called()
+
+
+def test_every_event_is_passed_and_filtered_by_the_tracker() -> None:
+    # The tool does not pre-filter: closed outcomes reach the tracker too,
+    # because the attack chain owns the decision (this is what lets a later
+    # update to needs_follow_up fire on the same entry path).
+    tracker = MagicMock()
+    with patch("strix.tools.coverage.tools.get_global_attack_chain", return_value=tracker):
+        _record()  # default outcome: no_issue_found
+    tracker.on_coverage.assert_called_once()
+    assert tracker.on_coverage.call_args.args[0]["outcome"] == "no_issue_found"
+
+
+def test_tracker_failure_does_not_block_recording() -> None:
+    tracker = MagicMock()
+    tracker.on_coverage.side_effect = RuntimeError("boom")
+    with patch("strix.tools.coverage.tools.get_global_attack_chain", return_value=tracker):
+        result = _record(
+            surface="POST /edit_profile/{company_id}",
+            risk_area="mass assignment of is_admin",
+            outcome="needs_follow_up",
+            evidence="Privilege check bypassed; follow-up planned.",
+        )
+    assert result["success"] is True
+    assert len(get_coverage_entries()) == 1
+
+
+def test_update_notifies_chain_with_new_outcome() -> None:
+    tracker = MagicMock()
+    with patch("strix.tools.coverage.tools.get_global_attack_chain", return_value=tracker):
+        created = _record()  # no_issue_found
+        updated = _update_impl(
+            entry_id=created["entry_id"],
+            outcome="needs_follow_up",
+            evidence="Second pass confirmed the is_admin mass assignment.",
+            agent_id="agent-1",
+            agent_name="authz-tester",
+        )
+    assert updated["success"] is True
+    outcomes = [call.args[0]["outcome"] for call in tracker.on_coverage.call_args_list]
+    assert outcomes == ["no_issue_found", "needs_follow_up"]

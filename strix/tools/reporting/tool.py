@@ -851,11 +851,23 @@ async def _do_create(
     errors.extend(http_exchange_errors)
 
     if errors:
+        logger.info(
+            "Vulnerability report rejected: agent=%s title=%r errors=%s",
+            agent_name or agent_id or "unknown",
+            title,
+            errors,
+        )
         return {"success": False, "error": "Validation failed", "errors": errors}
 
     try:
         cvss_score, severity, _vector = _calculate_cvss(cvss_breakdown)
     except ValueError as exc:
+        logger.info(
+            "Vulnerability report rejected: agent=%s title=%r errors=[%s]",
+            agent_name or agent_id or "unknown",
+            title,
+            exc,
+        )
         return {"success": False, "error": "Validation failed", "errors": [str(exc)]}
 
     try:
@@ -1975,6 +1987,12 @@ async def _do_create_dependency(  # noqa: PLR0912, PLR0915
         errors.append(advisory_err)
 
     if errors:
+        logger.info(
+            "Dependency report rejected: agent=%s title=%r errors=%s",
+            agent_name or agent_id or "unknown",
+            title,
+            errors,
+        )
         return {"success": False, "error": "Validation failed", "errors": errors}
 
     try:
@@ -1982,6 +2000,12 @@ async def _do_create_dependency(  # noqa: PLR0912, PLR0915
             advisory_cvss, contextual_cvss_breakdown
         )
     except ValueError as exc:
+        logger.info(
+            "Dependency report rejected: agent=%s title=%r errors=[%s]",
+            agent_name or agent_id or "unknown",
+            title,
+            exc,
+        )
         return {"success": False, "error": "Validation failed", "errors": [str(exc)]}
     dependency_metadata = _build_dependency_metadata(
         package_name=package_name,

@@ -1,9 +1,9 @@
 # Strix-Opt 改进 C — 发现→续攻闭环(Attack-Chain Continuation)设计文档
 
-- 日期:2026-10-22
-- 状态:**待评审**(实现未开始)
+- 日期:2026-10-22(v2 同日)
+- 状态:**v1 已实现并完成 005 四连 run 实验;v2(§9)已实现,待复跑实验**
 - 定位:原计划三方向 **A(spawn 准入)/ B(预算感知)/ C(反馈驱动)** 中 C 的落地;也是 [adaptive-scheduler-design.md](adaptive-scheduler-design.md) §11 "v2 展望"第 1 条的具体化
-- 关联:[ablation-2026-10-21.md](experiments/ablation-2026-10-21.md)、[baseline-xben-2026-10-21.md](experiments/baseline-xben-2026-10-21.md)
+- 关联:[ablation-2026-10-21.md](experiments/ablation-2026-10-21.md)、[baseline-xben-2026-10-21.md](experiments/baseline-xben-2026-10-21.md)、[chain-continuation-2026-10-22.md](experiments/chain-continuation-2026-10-22.md)(v1 四连 run 实验记录)
 
 ## 0. 摘要
 
@@ -158,3 +158,36 @@ If nothing new becomes reachable, record that conclusion in the final report.
 | Phase 3 | 结果并入简历叙事,更新 ablation/进度/memory | — |
 
 每阶段独立 commit,全部在 `feat/adaptive-scheduler` 分支。
+
+## 9. v2:四连 run 死因驱动的三项修正(2026-10-22)
+
+v1 四连 run(见 [chain-continuation-2026-10-22.md](experiments/chain-continuation-2026-10-22.md))给出了机制级全通、任务级 0/4 的结果,并解剖出三层死因。v2 的三项修正与三层死因一一对应,全部保持通用规则、零任务特定字符串、零新 CLI 旗标。
+
+### 9.1 死因 → 修正映射
+
+| 四连 run 死因(实测证据) | v2 修正 | 实现 |
+|---|---|---|
+| **① 预算收尾指令与续攻指令互搏**(run2/3:finding 落在 $0.63–0.74,预警带恰好埋进链式工作区间,root 先读到"该收尾了") | **续攻窗口(wrap-up deferral)**:指令送达后,预算收尾预警被暂扣 `min(注入成本 + 0.20×总预算, 0.88×总预算)`;窗口只重排压力,不撤销安全网——0.88 天花板刻意压在 vanilla 90% 子 agent 保留线之下,预警在强制停机前必然恢复,预算硬停与保留栈原样生效 | `attack_chain.py` `open_wrapup_deferral` / `wrapup_deferral_active`;`hooks.py` `_maybe_warn_budget` 前置检查、`_maybe_inject_continuation` 送达后开窗 |
+| **② 报告层吞掉能力型发现**(run4:4 次 `create_vulnerability_report` 3 次被校验拒绝且零日志痕迹;~40:1 自报:落库,提权 finding 从未到达 chain 监听的汇合点) | **拒绝可观测**:4 个 create 拒绝点(动态×2 + 依赖×2)全部记录 `agent + title + errors`,让"发现死在报告层"从不可见变为可归因 | `tools/reporting/tool.py` 4 处 `logger.info` |
+| **③ 知识在场、行动缺席**(run4:7 条 `needs_follow_up` coverage 按时间排列恰为完整三跳链 /token→HS256→is_admin→/jobs,但没有任何机制消费 coverage 信号) | **coverage 次级触发源**:`needs_follow_up` 且 surface+risk_area 命中同一组能力正则 → 走同一注入路径,恒为 tier 2,decisions.jsonl 记 `source: "coverage"` | `attack_chain.py` `on_coverage`;`tools/coverage/tools.py` `_notify_chain` 挂在 `_record_impl`/`_update_impl` 成功路径 |
+
+### 9.2 关键设计决策
+
+- **同一组能力正则,两处使用**:报告(标题+描述)与 coverage(surface+risk_area)共用 `_text_describes_capability`,整个系统只有一个校准故事。已知代价:run4 的 7 条线程中仅 1 条(is_admin 提权)会命中——这是"精确优先于召回"的刻意取舍,其余 6 条是响应头/加密配置类加固备注,不应打扰 root。
+- **恒 tier 2**:开放线程是比已确认 finding 更弱的信号(可能是误报或低价值),不享有 tier 1 待遇。
+- **线程安全升级**:coverage 的 `_record_impl`/`_update_impl` 经 `asyncio.to_thread` 在工作线程执行,而报告路径在事件循环上——tracker 引入 `threading.Lock`,enqueue/cap/drain/开窗全部原子。
+- **同队列同上限**:coverage 指令与报告指令共享 3 次注入上限与去重空间(`entry_id` 与 report id 同池),风暴场景下不会超发。
+- **并发契约**:coverage 工具把每个事件(含闭合态)原样递给 tracker,过滤决策全部在 chain 侧——后续 update 翻转成 `needs_follow_up` 时走同一通路,无需工具侧理解触发规则。
+- **拒绝日志只是观测,不改判定**:报告层 40:1 的自报:落库比是 vanilla 独立缺口,v2 先让它可见;是否进一步(校验降门槛/失败反馈给 agent)留给数据说话。
+
+### 9.3 测试与验证
+
+新增 22 项测试(全 mock,零 API):coverage 触发 6(触发/四闭合态不触发/非能力面不触发/消息内容/去重/共享上限)+ 窗口 8(带内暂扣/天花板绑定/重开/shadow 永不暂扣/未注入不暂扣/每窗口日志一次/参数校验×2)+ hooks 接线 4(同轮重叠一次/窗口过后预警恢复/注入即开窗/无指令不暂扣)+ coverage 工具接线 4(开放线程通知/全事件透传/tracker 异常不阻塞记录/update 携带新结局)+ 报告拒绝日志 2(动态/依赖,断言 agent 身份入日志)。ruff + mypy strict 干净。
+
+### 9.4 v2 边界(诚实声明)
+
+- 同轮重叠是设计属性:注入当轮的预算预警在指令送达**之前**计算,仍会出现一次;窗口保护的是**后续轮次**——即链式工作实际发生的区间。
+- 窗口对 root 与子 agent 一视同仁(检查在 root 判定之前):链式专职子 agent 正是最需要跑道的 agent,但代价是它的 NOTICE/URGENT 预警带(0.75/0.80/0.85)在窗口内同样被暂扣,只剩 0.88→0.90 的 CRITICAL 带与 0.90 硬停——这是"链式工作完整 vs 子 agent 收尾余量"之间的刻意取舍,复跑数据可验证其净效应。
+- coverage 触发的校准证据只有 run4 单 run 的反事实(7 线程中 1 命中),真实触发率待复跑测量。
+- 提权 finding 若死在报告层校验(v2 ②),coverage 触发是其唯一活路——两层修正恰好互为备份,但也意味着 flag 概率仍受发现层方差支配(~50/50 评估不变)。
+- 窗口参数(0.20/0.88)来自 005 的 $1.10/75 配置时间线,未做跨预算规模验证。

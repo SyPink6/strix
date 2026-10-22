@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import TYPE_CHECKING, Any, cast
 
@@ -241,6 +242,72 @@ async def test_create_report_rejects_invalid_fix_effort(report_state: ReportStat
     )
     assert result["success"] is False
     assert any("fix_effort" in e for e in result["errors"])
+    assert not report_state.vulnerability_reports
+
+
+async def test_create_report_rejection_is_logged_with_agent_identity(
+    report_state: ReportState, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Run-4 forensics: 3 of 4 create calls were rejected with no log trace,
+    so the biggest sub-agent's filing attempts were invisible afterwards."""
+    with caplog.at_level(logging.INFO, logger="strix.tools.reporting.tool"):
+        result = await _do_create(
+            title="Admin Escalation on /edit_profile",
+            description="d",
+            impact="i",
+            target="t",
+            technical_analysis="ta",
+            poc_description="p",
+            poc_script_code="c",
+            remediation_steps="r",
+            evidence="   ",
+            assumptions="a",
+            counterevidence="none found",
+            confidence="high",
+            severity_change_conditions="n/a",
+            fix_effort="low",
+            cvss_breakdown=_CVSS,
+            endpoint=None,
+            method=None,
+            cve=None,
+            cwe=None,
+            code_locations=None,
+            agent_id="fea65088",
+            agent_name="IDOR & Mass Assignment",
+        )
+    assert result["success"] is False
+    assert "Vulnerability report rejected" in caplog.text
+    assert "IDOR & Mass Assignment" in caplog.text
+    assert "Admin Escalation on /edit_profile" in caplog.text
+    assert not report_state.vulnerability_reports
+
+
+async def test_create_dependency_report_rejection_is_logged(
+    report_state: ReportState, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.INFO, logger="strix.tools.reporting.tool"):
+        result = await _do_create_dependency(
+            title="CVE-2021-23337 in lodash 4.17.20",
+            description="Command injection via template.",
+            target="repo/package.json",
+            cve="CVE-2021-23337",
+            package_name="lodash",
+            installed_version="4.17.20",
+            impact="Arbitrary command execution.",
+            remediation_steps="Upgrade to 4.17.21.",
+            assumptions="   ",
+            package_ecosystem="npm",
+            manifest_path="package-lock.json",
+            fixed_version="4.17.21",
+            cwe="CWE-94",
+            advisory_cvss=7.2,
+            technical_analysis=None,
+            fix_effort="trivial",
+            agent_id="dep-1",
+        )
+    assert result["success"] is False
+    assert "Dependency report rejected" in caplog.text
+    assert "dep-1" in caplog.text  # no agent_name, so the id is the identity
     assert not report_state.vulnerability_reports
 
 

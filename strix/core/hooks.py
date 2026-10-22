@@ -285,6 +285,14 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         if report_state is None:
             return
         cost = report_state.get_total_llm_cost()
+        chain = get_global_attack_chain()
+        if chain is not None and chain.wrapup_deferral_active(
+            cost=cost, max_budget_usd=self._max_budget_usd
+        ):
+            # A continuation directive was just delivered: hold wrap-up pressure
+            # for the bounded deferral window so the chain work has a runway.
+            # The enforced stops (budget limit, sub-agent reserve) still apply.
+            return
         is_root = context.context.get("parent_id") is None
         if self._interactive:
             bands = _ROOT_BUDGET_WARN_BANDS
@@ -351,15 +359,22 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         input_items: list[TResponseInputItem],
     ) -> None:
         """Attack-chain continuation (inert unless configured): queued follow-up
-        directives from filed high-impact findings, delivered to the root agent
-        on its next turn through the same cache-safe append channel."""
+        directives from capability-relevant findings and open coverage threads,
+        delivered to the root agent on its next turn through the same cache-safe
+        append channel. Delivering a directive also opens the wrap-up deferral
+        window that holds budget wrap-up warnings back for a bounded runway."""
         chain = get_global_attack_chain()
         if chain is None:
             return
         if context.context.get("parent_id") is not None:
             return  # continuation directives are for the root orchestrator
-        input_items.extend(
-            {"role": "user", "content": message} for message in chain.drain_for_root()
+        messages = chain.drain_for_root()
+        if not messages:
+            return
+        input_items.extend({"role": "user", "content": message} for message in messages)
+        report_state = get_global_report_state()
+        chain.open_wrapup_deferral(
+            report_state.get_total_llm_cost() if report_state is not None else 0.0
         )
 
     async def on_llm_end(
