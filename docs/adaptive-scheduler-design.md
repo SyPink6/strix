@@ -2,7 +2,7 @@
 
 - 日期:2026-10-21
 - 基线:[baseline-xben-2026-10-21.md](experiments/baseline-xben-2026-10-21.md)(3 题,$2.507 / 98.2 min / 584 请求 / FLAG 2/3)
-- 状态:**Phase 0(M0 价格兜底)与 Phase 1(M1-M4 调度核心)已实现并通过测试**;Phase 2(CLI 接线 + smoke)待实施
+- 状态:**Phase 0–3 全部完成**(2026-10-21):实现+单测 0 新增失败,smoke 与消融实验 B/C-/C 已跑完并产出 [experiments/ablation-2026-10-21.md](experiments/ablation-2026-10-21.md)
 
 ## 0. 摘要
 
@@ -140,8 +140,8 @@ M2(c) 的实现是三条开头句窄模式(大小写不敏感):`\byou are (a\|an
 |---|---|---|
 | Phase 0 | M0 + 单测(扩展 `test_pricing.py`) | **✅ 完成**(2026-10-21) |
 | Phase 1 | scheduler core + M1-M4 + mock 单测 | **✅ 核心完成**(2026-10-21;`adaptive_scheduler.py` + ledger `agent_cost()` + hooks/execution 挂点,42+3 项新单测) |
-| Phase 2 | CLI 接线(`--scheduler`/`--per-agent-share`/决策日志路径)+ 1 题 smoke 自测(~$0.3) | **接线完成**(2026-10-21,`cli_args.py`/`cli.py`/`runner.py` + 解析测试 9 项);smoke 待跑 |
-| Phase 3 | B → C- → C 实验 + 分析文档 | ~半天 + ~2h 机时 |
+| Phase 2 | CLI 接线(`--scheduler`/`--per-agent-share`/决策日志路径)+ 1 题 smoke 自测(~$0.3) | **✅ 完成**(2026-10-21;smoke 实测 $0.639,decisions.jsonl 落盘) |
+| Phase 3 | B → C- → C 实验 + 分析文档 | **✅ 完成**(2026-10-21;10 run / $5.76 / 4h33m,见 ablation-2026-10-21.md;C vs C- 成本 -13%、请求 -21%,规则误报率 ~50% 是 v2 头号输入) |
 
 每阶段独立 commit,全部在 `feat/adaptive-scheduler` 分支;baseline tag 永久保留作参照。
 
