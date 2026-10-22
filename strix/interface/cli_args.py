@@ -325,6 +325,20 @@ Strix Cloud:
     )
 
     parser.add_argument(
+        "--chain-continuation",
+        dest="chain_continuation",
+        choices=("off", "shadow", "enforce"),
+        default="off",
+        help=(
+            "Attack-chain continuation (default 'off' keeps vanilla behavior). "
+            "When a filed finding signals an access-capability change, 'shadow' "
+            "logs the continuation event to decisions.jsonl without acting; "
+            "'enforce' also injects a one-time follow-up directive into the root "
+            "agent's next turn."
+        ),
+    )
+
+    parser.add_argument(
         "--max-turns",
         dest="max_turns",
         metavar="N",

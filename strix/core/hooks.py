@@ -10,6 +10,7 @@ from agents.lifecycle import RunHooks
 
 from strix.core.adaptive_scheduler import get_global_adaptive_scheduler
 from strix.core.agents import BudgetPolicy, coordinator_from_context
+from strix.core.attack_chain import get_global_attack_chain
 from strix.report.state import get_global_report_state
 
 
@@ -210,6 +211,7 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
             self._maybe_warn_turns(context, input_items)
             self._maybe_warn_budget(context, input_items)
             self._maybe_warn_agent_share(context, agent, input_items)
+            self._maybe_inject_continuation(context, input_items)
         except Exception:
             logger.exception("budget/turn warning injection failed")
 
@@ -342,6 +344,23 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         )
         if decision.should_warn and decision.message:
             input_items.append({"role": "user", "content": decision.message})
+
+    def _maybe_inject_continuation(
+        self,
+        context: RunContextWrapper[dict[str, Any]],
+        input_items: list[TResponseInputItem],
+    ) -> None:
+        """Attack-chain continuation (inert unless configured): queued follow-up
+        directives from filed high-impact findings, delivered to the root agent
+        on its next turn through the same cache-safe append channel."""
+        chain = get_global_attack_chain()
+        if chain is None:
+            return
+        if context.context.get("parent_id") is not None:
+            return  # continuation directives are for the root orchestrator
+        input_items.extend(
+            {"role": "user", "content": message} for message in chain.drain_for_root()
+        )
 
     async def on_llm_end(
         self,

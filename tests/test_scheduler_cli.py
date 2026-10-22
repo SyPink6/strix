@@ -1,4 +1,4 @@
-"""Tests for the --scheduler / --per-agent-share CLI surface."""
+"""Tests for the --scheduler / --per-agent-share / --chain-continuation CLI surface."""
 
 from __future__ import annotations
 
@@ -58,3 +58,18 @@ def test_invalid_share_rejected(bad: str, monkeypatch: pytest.MonkeyPatch) -> No
 def test_share_bounds_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _parse(["--per-agent-share", "1"], monkeypatch).per_agent_share == pytest.approx(1.0)
     assert _parse(["--per-agent-share", "0.01"], monkeypatch).per_agent_share == pytest.approx(0.01)
+
+
+def test_chain_continuation_defaults_to_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    args = _parse([], monkeypatch)
+    assert args.chain_continuation == "off"
+
+
+def test_chain_continuation_modes_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _parse(["--chain-continuation", "shadow"], monkeypatch).chain_continuation == "shadow"
+    assert _parse(["--chain-continuation", "enforce"], monkeypatch).chain_continuation == "enforce"
+
+
+def test_unknown_chain_continuation_mode_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(SystemExit):
+        _parse(["--chain-continuation", "sometimes"], monkeypatch)

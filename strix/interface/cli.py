@@ -228,6 +228,7 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
                     max_turns=getattr(args, "max_turns", DEFAULT_MAX_TURNS),
                     scheduler_mode=getattr(args, "scheduler", "off"),
                     per_agent_share=getattr(args, "per_agent_share", DEFAULT_PER_AGENT_SHARE),
+                    chain_mode=getattr(args, "chain_continuation", "off"),
                     status_sink=_note_startup_phase,
                 )
             finally:

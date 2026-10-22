@@ -34,6 +34,10 @@ from strix.core.adaptive_scheduler import (
     set_global_adaptive_scheduler,
 )
 from strix.core.agents import AgentCoordinator, BudgetPolicy
+from strix.core.attack_chain import (
+    AttackChainContinuation,
+    set_global_attack_chain,
+)
 from strix.core.execution import (
     respawn_subagents,
     run_agent_loop,
@@ -216,6 +220,7 @@ async def run_strix_scan(
     budget_policy: BudgetPolicy = "stop",
     scheduler_mode: Literal["off", "shadow", "enforce"] = "off",
     per_agent_share: float = DEFAULT_PER_AGENT_SHARE,
+    chain_mode: Literal["off", "shadow", "enforce"] = "off",
     model: str | None = None,
     cleanup_on_exit: bool = True,
     event_sink: StreamEventSink | None = None,
@@ -247,6 +252,11 @@ async def run_strix_scan(
     run's ``decisions.jsonl`` without acting, ``"enforce"`` also denies
     matching spawns; ``per_agent_share`` sets the per-agent cost ceiling it
     enforces as a fraction of ``max_budget_usd``.
+    ``chain_mode`` enables attack-chain continuation (default ``"off"``):
+    when a filed finding signals an access-capability change (high/critical
+    severity, or a medium whose text describes one), ``"shadow"`` logs the
+    trigger without acting and ``"enforce"`` also injects a one-time follow-up
+    directive into the root agent's next turn.
     ``mcp_connection_requests`` supplies the run's MCP connections from any
     source: when given, the engine connects those requests; when ``None`` (the
     command-line default) it reads ``~/.strix/mcp-servers.json`` itself. Either
@@ -284,6 +294,21 @@ async def run_strix_scan(
         else None
     )
     set_global_adaptive_scheduler(scheduler)
+
+    # Attack-chain continuation (off by default): finding-driven follow-up
+    # directives for the root agent. Rebuilt per scan like the scheduler, and
+    # "off" clears any tracker a prior scan in this process left behind. It
+    # shares the run's decisions.jsonl with the scheduler; the "kind" field
+    # tells the records apart.
+    chain = (
+        AttackChainContinuation(
+            mode=chain_mode,
+            decision_log=run_dir / "decisions.jsonl",
+        )
+        if chain_mode != "off"
+        else None
+    )
+    set_global_attack_chain(chain)
 
     agents_path = state_dir / "agents.json"
     agents_db = state_dir / "agents.db"

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from strix.config import codex
 from strix.config.loader import load_settings
+from strix.core.attack_chain import get_global_attack_chain
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.report.coverage import write_coverage
 from strix.report.pricing import (
@@ -38,6 +39,21 @@ logger = logging.getLogger(__name__)
 _global_report_state: Optional["ReportState"] = None
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def _notify_attack_chain(report: dict[str, Any]) -> None:
+    """Forward a filed report to the attack-chain continuation tracker, if any.
+
+    Never raises: continuation is an advisory channel and must not be able to
+    break the reporting path it watches.
+    """
+    chain = get_global_attack_chain()
+    if chain is None:
+        return
+    try:
+        chain.on_finding(report)
+    except Exception:
+        logger.exception("attack-chain continuation trigger failed")
 
 
 class ReportRollbackError(RuntimeError):
@@ -434,6 +450,7 @@ class ReportState:
 
         self.vulnerability_reports.append(report)
         logger.info(f"Added vulnerability report: {report_id} - {title}")
+        _notify_attack_chain(report)
         posthog.finding(severity, cwe=cwe, is_cve=bool(cve))
         scarf.finding(severity, cwe=cwe, is_cve=bool(cve))
 
