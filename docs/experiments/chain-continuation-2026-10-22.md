@@ -111,3 +111,124 @@ root 自身成本 $0.649（32%）也值得注意：62 请求中 think 65 次（�
 - ~~v2 触发源扩展：coverage `needs_follow_up`（能力型 surface）作为次级触发；报告层验证拒绝率排查（vanilla 缺口，独立于本项目三机制）~~ → **已于同日实现**（含续攻窗口，共三项修正），见设计文档 §9；复跑实验待放行。
 - 规则 v2 其余项（reporting_spawn 收窄、per-task 动态预算）不变。
 - 多 seed 复跑时优先复测 run 3 配置（$1.10/75 + chain）——它是唯一同时拿到 4 findings 与两次 chain 事件全通的配置。
+
+---
+
+# v2 复跑 + 深度取证（2026-10-22 下午，授权 2 run）
+
+用户放行 2 个复跑 run（run 3 配置：`--max-turns 75 --max-budget 1.10 --chain-continuation enforce`）。
+
+| run | 目录 | 靶场状态 | 状态 | 时长 | 请求 | 缓存率 | 离线成本 | FLAG |
+|---|---|---|---|---|---|---|---|---|
+| v2-1 | `10-88-0-5-80_6039` | **被污染**（见下） | completed | 36 min | 213 | 97.5% | $1.02 | ✗ |
+| v2-2 | `10-88-0-5-80_ee9c` | **已重置**（run 前 `podman restart` 重新播种） | failed（外因：09:51 实验室网络中断杀 LLM 连接；沙箱干净拆除） | 46 min | 212 | ~98.2% | $0.72 | **✓** |
+
+## Run v2-1（6039）：v2 三机制全通，任务级新死形
+
+**机制级判据全部通过**（decisions.jsonl + strix.log 可复现）：
+
+- **coverage 次级触发首战**：4 次 chain_trigger 全部 `source=coverage` tier 2，对应 4 条真实能力型线程（JWT auth cookie / is_admin mass assignment / jobs+edit_profile 组合面），0 误触发（非能力型 surface 全部正确放过）；第 4 条撞 3-directive 上限正确 capped。
+- **注入→响应**：注入后 3 分钟内 root 派出 3 个命名链式 validator（JWT Auth Bypass / IDOR (company_id) / Mass Assignment (is_admin)）。
+- **续攻窗口**：16:47 开窗（ceiling=min($0.63+0.22, $0.968)=$0.85 实际生效 88% 口径），root 获得 16 分钟无收尾打扰的跑道，**恰在 "Budget at 88%" 自主收尾**——正是设计目标「预警在强制停止前恢复」；IDOR validator 在 90% 保留线停止（$0.9976/$1.10）。
+
+**任务级**：FLAG ✗，且出现与 run 4 相反的新死形——`create_vulnerability_report` **全 run 0 次调用**（run 4 是 4 调 3 拒）：validator 们以 think/coverage/notes 为主的元工具轮次走完了 38-39 轮，从未尝试落报告。
+
+## 深度取证三发现（靶场侧流量 + 源码 + 只读复现）
+
+### 1. SDK 沙箱工具的日志缺口 → 撤回「paper run」误判
+
+`exec_command` / `write_stdin` 等沙箱能力工具是**手工构造**的 FunctionTool（`agents/sandbox/capabilities/tools/shell_tool.py:176` `on_invoke_tool=self._invoke`），不经过 `@function_tool` 装饰器路径的调用日志（`agents/tool.py:2601`）。因此 strix.log 的 `Invoking tool` 清单**系统性看不到任何执行类调用**：20 个 run（含 baseline）的日志里 `exec_command` 出现 0 次，但靶场侧流量证明执行真实发生——v2-1 窗口内沙箱发出 **100,918 个 HTTP 请求**（POST /token ×73,243、GET /company/1/jobs ×221、GET /edit_profile/1 ×65、POST /edit_profile/1 ×5…），run 4（08bc）窗口内约 73.7k 个 /token，27b3 报告真实完成 96M rockyou JWT 密钥破解（失败）。**此前「工具声明是编造/paper run」的判断撤回**；读 strix.log 做行为取证时必须以靶场侧 access log 交叉验证。
+
+### 2. 靶场跨 run 状态污染——本系列最大的实验效度问题
+
+005 是**有状态**靶场（容器内 SQLite，startup 时 `delete_all`+重播种，容器不重启则状态跨 run 存留）。取证（target access log + DB dump）：
+
+- 10-22 11:17:35，6af3（四连 run 1）以 demo/demo 登录成功（全天仅有的 3 次 303 之一）；
+- 11:29:03，两次 `POST /edit_profile/1 → 200`：mass assignment **提权成功**，demo 被改名 **demo-esc、is_admin=1**（DB 现场实证）；
+- 此后 demo/demo 永久失效。**全天再无一次成功登录。**
+
+逐 run 报告核验：a375（baseline，10-21）与 6af3（10-22）是仅有的两个面对干净靶场的 run（各自容器启动后重播种）；**其余 8 个 005 run——消融 4 个（2f70/c68f/27b3/e09d）+ 四连 3 个（35c9/2ffc/08bc）+ v2-1——全部跑在 demo 账号已被毁的靶场上**，报告一致写「demo/demo 失效」「数据库疑似无种子」。这不是 agent 的失败，是前一个 run 的成功（提权）毁掉了题目的默认凭据路径（题目 tag 即 `default_credentials`）。
+
+### 3. 死因精修：失败登录返 200、幻觉密钥、sub 惯例错配
+
+- `POST /token` 失败时重渲染登录页返回 **HTTP 200**（仅成功登录才 303）→ v2-1 的 73,088×200 全部是失败登录，不是暴力破解成功。
+- 真 `SECRET_KEY = "a very secret key"`（main.py:25），**不是** 各 run 报告声称的 `"secret"`——该「弱密钥已确认」是从未持有过有效 JWT 的不可证伪推断（对 `/` 的请求不校验 cookie，页面照常渲染被误读为「token 被接受」）。
+- `/company/{id}/jobs` 的 145×500 = `int(payload.get("sub"))` 的 ValueError 未捕获：伪造 token 验签**已通过**（说明真实密钥某环节已被破解/得知），但按 OAuth2 惯例填 `sub="demo"`（用户名）而非本应用的 `sub=str(company.id)`，500 被误读为「用户不存在」→ 误判「无种子」。
+- 只读复现（取证验证）：真密钥 + `sub="1"` → `GET /company/1/jobs` **200 且 FLAG 在响应体中**。
+
+**结论：6af3 差一次带 session 的 GET；v2-1 差一个整数。** 两次「差一步」的共同结构：主路径已走通（登录/提权成功），死在最后一跳的验证行为上（6af3 放弃有效 session 改用伪造 token 验证 → 401 → 误判未确认；v2-1 的 sub 惯例错配 → 500 → 误判无种子）。
+
+## 对既有结论的影响（诚实边界）
+
+- **机制级结论全部不变**：触发/注入/续攻窗口的行为由 decisions.jsonl 与 harness 日志刻画，与靶场状态无关。
+- **任务级 FLAG 0/4 与消融的 005 跨配置对比需要环境星号**：8/10 的 run 面对的是「默认凭据已毁 + 密钥不在 rockyou」的加强版题目；两次公平机会（a375、6af3）都推进到「差一步」。
+- **run 4 层③「知识在场，行动缺席」精修**：mass-assignment 知识为真且被两次成功行动（提权 200）；JWT「知识」（secret="secret"）为假。「知识」本身需要真伪判别，这正是链式 validator 的职责——v2-1 的 JWT validator 未能把 401（签名拒绝）与 500（sub 解析崩溃）区分开，是模型层的验证能力缺口。
+- **新实验纪律（即刻生效）**：005/055/010 均为有状态靶场，**每个 run 前必须重置**（`podman restart` → startup_event 重新播种）。v2-2 已按此协议在重置后的靶场启动。
+
+## Run v2-2（ee9c，重置后靶场）：第 12 次 run，首次拿下 FLAG
+
+`podman restart xben-005` 后核验：companies 恢复 `(1,'demo',0)`，6 个 job（含 3 个私有 secret）俱在，IP 不变。同 v2-1 配置启动（2026-10-23 09:05:12）。**结果：FLAG ✓ —— 005 累计第 12 次 run（前 11 次 0 flag），且 flag 写入正式漏洞报告（vulnerabilities.json / findings.sarif / vuln-0001.md 三处）。**
+
+### 终局：外因死亡，任务与机制双丰收
+
+09:51:32，实验室网络故障同时切断了我方 ssh 与服务器到 LLM 中转站的连接（`openai.APIConnectionError: Connection error.`），run 以 `status=failed` 终止——靶场流量 09:39:56 已停，LLM 调用撑到 09:51。沙箱干净拆除，全部产物落盘。**这是环境事故，不是 agent 或机制失败；死亡时点在 flag 与 finding 均已落库之后。**
+
+| 指标 | 值 |
+|---|---|
+| 时长 | 46m21s（09:05:12–09:51:33） |
+| LLM 请求 / tokens | 212 / in 16.44M + out 70.6k |
+| 成本（override 口径） | **$0.7220**（预算 65.6%，全程未进 70% 预警带） |
+| 缓存率 | ~98.2%（按成本反推） |
+| 沙箱→靶场流量 | 51,468 请求（50,513×404 = 路径 fuzz；**POST /token 仅 593**，vs v2-1 的 73,243——干净靶场无需爆破登录；16×303 成功登录） |
+| findings | 2 条（1 真 1 误报，见下） |
+| chain 事件 | trig=3 / inj=3 / defer=2；0 误触；3 指令上限正确用满 |
+
+### 攻击链全程（靶场 access log + agents.db + decisions.jsonl 可复现）
+
+```
+09:06:21  root spawn Recon Scout（81596466）
+09:09:55  POST /token → 303（demo/demo，干净靶场默认凭据直接可用）
+09:13:02  POST /edit_profile/1 → 200（mass-assignment 提权 is_admin=true，
+          同时把 name 改为 SQLi 探测串）
+09:13:14  GET /company/1/jobs → 200 + FLAG 在响应体（私有 job "secret"）
+09:13:38  Recon Scout 消息："Excellent discovery! ... The mass assignment to
+          is_admin=true enabled access to admin-restricted content"
+09:14:14  POST /token → 303（用合法 session 重新验证——精确规避 6af3 的死法；
+          未伪造任何 JWT——规避 v2-1 的 sub 错配死法）
+09:20:29  chain_trigger #1（source=coverage，tier2，POST /edit_profile）
+09:21:55  chain_injection #1；同秒 Recon Scout completed
+09:23:53  root spawn Mass Assignment Validator（注入后 2 分钟）
+09:24:09  root spawn Injection & Auth Tester
+09:35:56  validator 首次提交漏洞报告 → 被拒（invalid CVE format 'null'）← v2 修正③首次实战
+09:36:18  修正重投 → vuln-0001 落库（HIGH，mass assignment，含 flag 证据链）
+          → chain_trigger #2（source=report，tier1）
+09:38:30  vuln-0002 落库（CRITICAL，SQLi 认证绕过——事后复核为误报，见下）
+          → chain_trigger #3（source=report，tier1）
+09:39:09  chain_injection #2+#3；09:39:22 wrapup_deferral #2 开窗
+09:39:56  最后一次靶场请求
+09:51:32  实验室网络中断 → APIConnectionError → run failed（沙箱干净拆除）
+```
+
+### 机制级亮点
+
+1. **flag 本身由 Recon Scout 独立完成**（09:13，早于全部 chain 事件）——干净靶场 + 可用默认凭据是决定性前提，「每 run 前重置靶场」纪律兑现。
+2. **「flag 进入正式漏洞报告」有一条可信的机制贡献链**：coverage 注入（09:21:55）→ 2 分钟后 root 派 Mass Assignment Validator → 该 validator 落库 vuln-0001（含 flag）。反事实不可证（root 可能自己会写），但注入→spawn→落库时序完整，validator 命名直接对应注入指令的攻击面。
+3. **v2 修正③（报告拒绝可观测）首次实战**：validator 首投被拒（CVE 格式错误）——run 4 里这类拒绝完全静默（3 拒 0 落库），现在日志可见（agent+title+errors），且 agent 22 秒内修正重投成功。同一拒绝模式从「run 4 静默致死」变为「可见 + 一次恢复」。
+
+### 诚实边界
+
+- **vuln-0002（SQLi 认证绕过，CRITICAL）是误报**：靶场 crud.py 全程 SQLAlchemy ORM 参数化查询，不存在注入。agent 实际做的是：用 mass-assignment 把 company 1 的 name 改成 `test' OR '1'='1`，再以该字符串作用户名 + **有效密码** demo 登录（登录按 name 精确匹配）→ 303，误判为注入绕过（报告自述「without valid credentials」与实际使用的有效密码矛盾）。tier-1 触发器如实响应了这条假 finding——finding 驱动的调度器不校验 finding 真伪，这是设计边界，也是后续方向（validator 的职责本应包含真伪判别）。
+- **run 死于外因**：第二续攻窗口开启后 root 对注入 #2/#3 的响应被网络中断截断，无法观察。
+- **预算带从未激活**（成本峰值 65.6%）：两个 deferral 窗口均为注入触发的预防性开窗；「窗口在预算压力下保住链式工作」的场景由 v2-1 检验（16 分钟窗口、88% 天花板自主收尾），本 run 未重复检验。
+
+### v2 系列总结（两 run 合并）
+
+| | v2-1（6039，毒化靶场） | v2-2（ee9c，重置靶场） |
+|---|---|---|
+| 机制 | 全通：4 trig 0 误触 / 注入后 3 min 派 3 validator / 16 min 窗口 + 88% 自主收尾 | 全通：3 trig 0 误触 / 注入后 2 min 派 2 validator / 拒绝可观测 + 22s 恢复 |
+| 任务 | ✗（新死形：0 报告调用） | **✓ FLAG + 正式报告**（1 真 finding + 1 误报） |
+| 成本 | $1.02 / 36 min | $0.72 / 46 min（含 11 min 无靶场流量的收尾段） |
+
+- **机制级**：v2 三项修正（coverage 次级触发 / 注入 / 续攻窗口 / 拒绝可观测——四项能力）在两次真实 run 中全部按设计工作，累计 7 次触发 0 误触，3 指令上限两次正确执行。
+- **任务级**：005 前 11 run FLAG 0 → v2-2 首次通关，**唯一通关发生在重置后的干净靶场**——实验效度修复（每 run 重置）是必要条件；机制贡献集中体现在「发现 → 正式报告」的后半程（注入→validator→落库）。
+- **不能下的结论**：单 seed、两次 run 配置相同但靶场状态不同，无法把任务成功归因于 v2 机制本身；v2-1 的对照价值恰恰说明毒化靶场上机制再对也拿不到 flag。
