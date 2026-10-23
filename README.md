@@ -34,6 +34,112 @@
 
 </div>
 
+---
+
+<div align="center">
+
+## 🧪 Strix-Opt — This Fork's Additions
+
+**Budget-aware adaptive scheduling & finding-driven attack-chain continuation for the multi-agent pentesting harness**
+
+Research fork of [usestrix/strix](https://github.com/usestrix/strix) ·
+baseline: tag [`baseline-1.7.0`](https://github.com/SyPink6/strix/tree/baseline-1.7.0) (upstream Strix 1.7.0) ·
+dev branch: [`feat/adaptive-scheduler`](https://github.com/SyPink6/strix/tree/feat/adaptive-scheduler)
+
+Everything after this section is upstream Strix documentation, kept as-is.（本节以下为上游原文档，原样保留。）
+
+</div>
+
+**Goal:** keep task-completion quality while cutting token/API cost, and turn "knowledge in the transcript" into "action on the target" — optimizing the *multi-agent harness*, not the model. No model training, no agent-loop rewrite: every change hooks into an existing convergence point (`spawn_child_agent`, `add_vulnerability_report`, `on_llm_start`). Evaluated on XBOW Validation Benchmarks (XBEN) web-security tasks, driven by glm-5.2.
+
+| Addition | Mechanism | Measured evidence (XBEN) |
+|---|---|---|
+| **M0 — pricing override**<br>`STRIX_PRICE_OVERRIDES` | Fixes ambiguous LiteLLM price-catalog entries that resolved to `cost = 0` and silently disabled upstream's *entire* budget stack; overrides take priority over the catalog | Budget stack unlocked: agents self-wrapped-up at 87% budget; 4 child agents across 2 runs correctly stopped by the 90% reserve line (never fired before the fix) |
+| **Adaptive scheduler**<br>`--scheduler {off,shadow,enforce}` | Spawn admission (budget floor → reporting-spawn detection → trigram-Jaccard task dedup → concurrency cap) + per-agent cost ceiling + structured denials with suggestions + JSONL decision log | Ablation (enforce vs shadow): **−13% cost, −21% requests**; all 3 denials self-corrected by the root agent within 35 s; prompt-cache hit 97.5–98.8% preserved |
+| **Attack-chain continuation**<br>`--chain-continuation {off,shadow,enforce}` | Finding-driven continuation directives injected to the root agent: tiered trigger rules (critical/high; medium + capability keywords), coverage `needs_follow_up` secondary trigger, cache-safe root-only injection channel, wrap-up deferral window, report-rejection observability | **Zero rule-level false triggers** across all chain-enabled runs (9 fires in 6 runs; DoS / header / version-disclosure findings correctly passed). On stateful target XBEN-005-24: first flag in 12 runs, captured on the first run after the per-run target-reset protocol ($0.72 = 65.6% of a $1.10 budget, ~98% cache), with the flag reaching a formal vulnerability report via the injection → validator → filing chain |
+
+```bash
+# All additions are opt-in; defaults reproduce upstream behavior exactly
+strix --target http://your-app \
+  --scheduler enforce \
+  --per-agent-share 0.30 \
+  --chain-continuation enforce
+
+# Pricing fallback for models missing from (or ambiguous in) the LiteLLM catalog
+export STRIX_PRICE_OVERRIDES="model-name=input_price,output_price[,cached_input_price]"
+```
+
+New modules: [`strix/core/adaptive_scheduler.py`](strix/core/adaptive_scheduler.py) (spawn admission, per-agent share, decision log) ·
+[`strix/core/attack_chain.py`](strix/core/attack_chain.py) (trigger rules, directive queue, deferral window) ·
+[`strix/report/pricing.py`](strix/report/pricing.py) (price overrides), plus small hooks in `hooks.py` / `execution.py` / `runner.py` / coverage / reporting —
+**13 files changed, +1176/−6 lines, 77 new tests**; ruff + mypy `--strict` clean; zero new test failures vs the baseline tag.
+All numbers above are single-seed (n = 1 per config) real measurements, and task-level success is *not* causally attributed to the mechanisms — the explicit boundaries are in [诚实边界](#诚实边界) below.
+
+## 🧪 Strix-Opt 新增内容详解
+
+### 定位与边界
+
+不重写 Agent Loop、不训练模型，只做多 Agent harness 层的调度与成本优化。
+**上游 Strix 已有**（非本 fork 贡献）：全局预算与 70%/90% 预警/保留带、per-agent token/cost 归因（LLMUsageLedger）、多 Agent 协作与沙箱、`finish_scan` 中的静态 attack-chaining gate（仅收尾时检查）。
+**本 fork 新增**：定价兜底、spawn 准入与个体配额决策、finding 驱动的动态续攻、续攻窗口、报告拒绝可观测、`decisions.jsonl` 决策审计、shadow/enforce 灰度模式。
+
+### 创新点 1：M0 定价兜底——先救活上游"死掉"的预算栈
+
+LiteLLM 价格目录对部分模型（如 glm-5.2）存在歧义条目 → 成本解析返回 `None` → cost 恒为 0 → 上游的预算预警带/保留线/自主收尾**从未生效过**。`STRIX_PRICE_OVERRIDES` 以"override 优先于目录"的设计兜底（避免歧义目录静默解析到错价），在两处计费调用点前置生效。消融实验给出因果证据：修复后 87% 预算处 agent 自主收尾、2 个 run 共 4 个子 agent 被 90% 保留线正确停止让位 root——这些是上游代码里就有、但从未触发过的能力。
+
+### 创新点 2：自适应调度器——spawn 准入 + 个体问责
+
+上游 spawn 子 agent 零准入；per-agent 成本归因虽有数据、但无人消费。调度器在 `spawn_child_agent` 执行入口做四级准入（预算地板 → 报告型 spawn 识别，窄正则在 13 条真实基线任务上回归校准 → trigram-Jaccard 任务去重，阈值 0.80 → 并发 cap），每个 agent 另有成本天花板（默认 30% 预算，warn-once）。**拒绝时返回带建议的结构化 JSON**，root 可自我修正——实验中 3 次拒绝全部在 35 秒内按建议重 spawn，零中断。shadow 模式零行为变化可安全灰度；每条决策落 `decisions.jsonl` 可审计。
+
+### 创新点 3：攻击链续攻——「静态门 → 动态事件」
+
+取证显示：agent 把整条三跳攻击链的知识写进了 coverage/notes，却从未行动——上游唯一的 attack-chaining 检查是 `finish_scan` 里的静态 gate（收尾时才问一句）。本机制把它变成 **finding 驱动的动态事件**：`add_vulnerability_report` 这个唯一汇合点落库能力变化型 finding 时（tier1 = critical/high；tier2 = medium + 能力关键词，规则全通用、零题目特异串），经 cache-safe 通道向 root 注入一次性续攻指令；同 report 去重、每 run 3 条上限。四连 run 实验：机制五步全通（触发→注入→root 10-11 分钟内派出链式专职 agent），低危/DoS/响应头类 finding 全部正确不触发，**规则层误触发 0 次**。
+
+### 创新点 4：v2 三修正——每条对应一个取证出的死因
+
+| 修正 | 对应死因（取证） | 实测证据 |
+|---|---|---|
+| **续攻窗口**：指令送达后预算收尾预警暂扣至 min(注入成本 + 20% 预算, 88% 预算)，只重排不撤安全网 | 收尾指令与续攻指令互搏（四连 run2/3，链式 agent 被预警带 4-7 分钟晾死） | v2-1：16 分钟无打扰窗口，root 恰在 88% 天花板**自主**收尾 |
+| **coverage 次级触发**：`needs_follow_up` 能力型 surface 作为第二触发源 | 能力信号死在报告层（run4：自报 ~40 findings 仅 1 条落库） | v2-1 的 4 次触发全部对应真实能力线程；v2-2 正是 coverage→注入→validator 链路把 flag 送进正式报告 |
+| **报告拒绝可观测**：4 个拒绝点记录 agent + title + errors | 拒绝静默（run4：3 次拒绝 0 落库） | v2-2 首战：首投被拒（CVE 格式错误）日志可见，22 秒修正重投成功 |
+
+### 工程特质
+
+- **缓存前缀安全是设计约束**：所有注入走与预算警告相同的 cache-safe append 通道，全系列 run prompt-cache 命中 97-98%——成本优化不破坏缓存。
+- **可审计 + 可灰度**：每条调度/续攻决策落 `decisions.jsonl`；shadow 模式零行为变化。
+- **最小侵入**：挂点全在现有汇合点，13 个文件 +1176/−6 行，77 个新测试，ruff + mypy strict 干净，对照 baseline tag 零新增失败。
+
+### 方法论：实验效度治理
+
+靶场侧流量取证发现两个系统性问题并建立对应纪律：①**有状态靶场跨 run 污染**——10 个 005 run 里 8 个跑在被前 run 提权毁掉默认凭据的靶场上（报告一致误判"默认凭据失效"），由此建立**每 run 前重置靶场**协议；②**SDK 沙箱工具日志缺口**——harness 日志系统性看不到执行类工具调用，行为取证必须与靶场 access log 交叉验证。修复实验效度后，005 在第 12 次 run（首个干净靶场 + 完整机制）8 分钟内首夺 flag。
+
+### 实验总览（全部真实测量；模型 glm-5.2，离线成本口径 = 未缓存输入×价 + 输出×价）
+
+| 系列 | Run 数 | 花费 | 关键结果 |
+|---|---|---|---|
+| 基线（上游原版，3 题 L1/L2/L3） | 3 | $2.51 | FLAG 2/3；98.2 min；005 差最后一跳 |
+| 消融 B / C- / C | 10 | $5.76 | M0 解锁预算栈（87% 自主收尾、4 子 agent 被 90% 保留线停止）；C vs C- 成本 **-13%**、请求 **-21%**；缓存 97.5-98.8% |
+| 攻击链四连 run（005） | 4 | $4.29 | 机制五步全通、规则层误触 0；无预算对照 $2.00/1 finding vs $0.89/4 findings（预算感知的正面证据） |
+| v2 复跑（005，重置纪律） | 2 | $1.74 | 7 次触发 0 误触；**v2-2 首夺 FLAG**（$0.72 / 65.6% 预算 / 212 请求 / ~98.2% 缓存），flag 经注入→validator→落库进入正式漏洞报告 |
+| **合计** | ~20 | **≈$14.4** | |
+
+### 诚实边界
+
+- **单 seed**（n=1/配置）：不能把任务级成功（FLAG）归因于机制；干净靶场（重置协议）是必要条件，机制贡献集中在「发现 → 正式报告」的后半程。
+- v2-2 的 1 条 SQLi CRITICAL finding 经代码复核为**误报**（靶场全程 ORM 参数化）——finding 驱动的调度不校验 finding 真伪，这是设计边界，也是后续方向。
+- 其中 1 个 run 死于实验室网络中断（外因，且死亡发生在 flag 与 finding 落库之后）。
+
+### 文档索引
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/adaptive-scheduler-design.md`](docs/adaptive-scheduler-design.md) | M0 + 调度器设计（vanilla vs 新增边界、规则校准） |
+| [`docs/attack-chain-continuation-design.md`](docs/attack-chain-continuation-design.md) | 攻击链设计（§9：v2 三修正与死因映射） |
+| [`docs/experiments/baseline-xben-2026-10-21.md`](docs/experiments/baseline-xben-2026-10-21.md) | 上游基线测量（3 题） |
+| [`docs/experiments/ablation-2026-10-21.md`](docs/experiments/ablation-2026-10-21.md) | 消融实验 B/C-/C（10 run） |
+| [`docs/experiments/chain-continuation-2026-10-22.md`](docs/experiments/chain-continuation-2026-10-22.md) | 攻击链四连 run + v2 复跑 + 深度取证 |
+
+---
 
 > [!TIP]
 > **New!** Strix integrates seamlessly with GitHub Actions and CI/CD pipelines. Automatically scan for vulnerabilities on every pull request and block insecure code before it reaches production - [Get started with no setup required](https://app.strix.ai?utm_source=github&utm_medium=readme&utm_content=tip_ci).
