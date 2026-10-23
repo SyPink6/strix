@@ -83,6 +83,8 @@ All numbers above are single-seed (n = 1 per config) real measurements, and task
 **上游 Strix 已有**（非本 fork 贡献）：全局预算与 70%/90% 预警/保留带、per-agent token/cost 归因（LLMUsageLedger）、多 Agent 协作与沙箱、`finish_scan` 中的静态 attack-chaining gate（仅收尾时检查）。
 **本 fork 新增**：定价兜底、spawn 准入与个体配额决策、finding 驱动的动态续攻、续攻窗口、报告拒绝可观测、`decisions.jsonl` 决策审计、shadow/enforce 灰度模式。
 
+选型依据（为什么是 Strix、与 XBOW / CAI / HackingBuddyGPT 的横向对比）见 [`docs/agent-landscape-2026-10.md`](docs/agent-landscape-2026-10.md)。
+
 ### 创新点 1：M0 定价兜底——先救活上游"死掉"的预算栈
 
 LiteLLM 价格目录对部分模型（如 glm-5.2）存在歧义条目 → 成本解析返回 `None` → cost 恒为 0 → 上游的预算预警带/保留线/自主收尾**从未生效过**。`STRIX_PRICE_OVERRIDES` 以"override 优先于目录"的设计兜底（避免歧义目录静默解析到错价），在两处计费调用点前置生效。消融实验给出因果证据：修复后 87% 预算处 agent 自主收尾、2 个 run 共 4 个子 agent 被 90% 保留线正确停止让位 root——这些是上游代码里就有、但从未触发过的能力。
@@ -138,6 +140,7 @@ LiteLLM 价格目录对部分模型（如 glm-5.2）存在歧义条目 → 成�
 | [`docs/experiments/baseline-xben-2026-10-21.md`](docs/experiments/baseline-xben-2026-10-21.md) | 上游基线测量（3 题） |
 | [`docs/experiments/ablation-2026-10-21.md`](docs/experiments/ablation-2026-10-21.md) | 消融实验 B/C-/C（10 run） |
 | [`docs/experiments/chain-continuation-2026-10-22.md`](docs/experiments/chain-continuation-2026-10-22.md) | 攻击链四连 run + v2 复跑 + 深度取证 |
+| [`docs/agent-landscape-2026-10.md`](docs/agent-landscape-2026-10.md) | AI 渗透测试 agent 竞品格局与 Strix 架构亮点（选型依据） |
 
 ---
 
